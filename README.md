@@ -59,12 +59,28 @@ lsof -i :9210        # note the PID in LISTEN state
 kill -9 <PID>
 ```
 
-### Amazon Quick / Amazon Q Developer has a known bug in its OAuth state machine when handling re-authentication on expired tokens:
+# Amazon Quick / Amazon Q Developer has a known bug in its OAuth state machine when handling re-authentication on expired tokens:
 
 It spawns multiple overlapping authorization states (visible in the logs as duplicate /authorize requests with different state IDs).
 When the browser sends the callback to localhost:9210, the local HTTP handler responds with success HTML to the browser, but fails to dispatch the event to the waiting MCP client thread.
 
-# How to resolve it
+## What the logs show
+Looking directly at the Kubernetes pod logs during your re-auth attempt:
+
+1. MCP Server initiated the flow correctly:
+- Server returned 401 Unauthorized when the token expired.
+- Amazon Quick requested GET /authorize?...&redirect_uri=http://localhost:9210/oauth/callback...
+- Lark authorization completed and returned to the server at /auth/callback.
+2. MCP Server completed its handoff:
+- The MCP server issued an HTTP 302 Found redirecting your browser back to Amazon Quick's local listener (http://localhost:9210/oauth/callback?code=...&state=...).
+- Amazon Quick received the browser callback:
+- The webpage displaying "Authorized, you can close this tab" was served by Amazon Quick's local server running on localhost:9210.
+3. Amazon Quick failed to complete the exchange:
+- After receiving the authorization code, Amazon Quick was supposed to send a POST /token request to https://larkmcp.uzzikie.com/token to exchange the code for the session token.
+- No POST /token request was ever made to the MCP server.
+4. Amazon Quick's internal connection worker hung/lost the event from its own localhost:9210 listener and remained stuck waiting in the UI.
+
+## How to resolve it
 1. Restart Amazon Quick / Reload IDE Window:
 - Fully restart Amazon Quick (or in VS Code / JetBrains: Developer: Reload Window or restart the IDE).
 - This kills the orphaned localhost:9210 listener and clears the stuck internal state.
