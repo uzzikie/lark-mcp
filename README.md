@@ -58,3 +58,16 @@ Fix: find and kill the stale listener, then retry.
 lsof -i :9210        # note the PID in LISTEN state
 kill -9 <PID>
 ```
+
+### Amazon Quick / Amazon Q Developer has a known bug in its OAuth state machine when handling re-authentication on expired tokens:
+
+It spawns multiple overlapping authorization states (visible in the logs as duplicate /authorize requests with different state IDs).
+When the browser sends the callback to localhost:9210, the local HTTP handler responds with success HTML to the browser, but fails to dispatch the event to the waiting MCP client thread.
+
+# How to resolve it
+1. Restart Amazon Quick / Reload IDE Window:
+- Fully restart Amazon Quick (or in VS Code / JetBrains: Developer: Reload Window or restart the IDE).
+- This kills the orphaned localhost:9210 listener and clears the stuck internal state.
+2. Re-connect with a clean initial auth:
+- Reconnect or click authorize after the restart. Fresh/initial authentication succeeds cleanly, unlike the in-place re-auth flow.
+
