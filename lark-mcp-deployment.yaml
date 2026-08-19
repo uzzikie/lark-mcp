@@ -1,0 +1,168 @@
+# kubectl apply -f lark-mcp-deployment.yaml -n mcp
+# kubectl delete -f lark-mcp-deployment.yaml -n mcp
+# kubectl rollout restart deployment/lark-mcp -n mcp
+# kubectl logs deployment/lark-mcp -n mcp -f
+#
+# This file assumes the target namespace, a cert-manager Issuer, and a Certificate/TLS
+# secret for your chosen hostname already exist and are Ready — it only adds the app's
+# own Secret/PVC/Deployment/Service plus an Ingress that points at that existing TLS
+# secret.
+#
+# Before applying:
+#   1. Create your own Lark/Feishu app in the developer console, get its app-id/app-secret.
+#   2. Generate a signing key: openssl rand -hex 32 — put it and the app-secret below,
+#      or better, apply this Secret out-of-band (kubectl create secret / sealed-secrets /
+#      external-secrets) and delete the Secret block here entirely. Never commit real
+#      values to this file.
+#   3. Register https://<your-hostname>/auth/callback as a redirect URI for the app in
+#      the Lark Developer Console.
+#   4. Replace larkmcp.uzzikie.com and larkmcp-uzzikie-com-tls below with your own hostname
+#      and TLS secret name.
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lark-mcp-secrets
+type: Opaque
+stringData:
+  app-id: "<your Lark app id, e.g. cli_xxxxxxxxxxxxxxxx>"
+  # REPLACE before applying — do not commit a real value here: openssl rand -hex 32
+  # Stable across restarts/replicas; rotating it invalidates all issued MCP client tokens.
+  fastmcp-jwt-signing-key: "<generate with: openssl rand -hex 32>"
+  app-secret: "<your Lark app secret>"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lark-mcp-token-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lark-mcp
+  labels:
+    app: lark-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lark-mcp
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: lark-mcp
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+      - name: mcp-server
+        image: uzzikie/lark-mcp:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: http
+          protocol: TCP
+        env:
+        - name: LARK_APP_ID
+          valueFrom:
+            secretKeyRef:
+              name: lark-mcp-secrets
+              key: app-id
+        - name: LARK_APP_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: lark-mcp-secrets
+              key: app-secret
+        - name: FASTMCP_JWT_SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: lark-mcp-secrets
+              key: fastmcp-jwt-signing-key
+        - name: LARK_BRAND
+          value: lark
+        - name: PUBLIC_BASE_URL
+          value: https://larkmcp.uzzikie.com
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /.well-known/oauth-authorization-server
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /.well-known/oauth-authorization-server
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
+        volumeMounts:
+        - name: token-storage
+          mountPath: /data
+      volumes:
+      - name: token-storage
+        persistentVolumeClaim:
+          claimName: lark-mcp-token-pvc
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lark-mcp
+  labels:
+    app: lark-mcp
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3000
+    targetPort: 3000
+    protocol: TCP
+    name: http
+  selector:
+    app: lark-mcp
+---
+# External MCP clients (Claude.ai / Claude Desktop / ChatGPT custom connectors) need a
+# real internet-reachable HTTPS redirect URI for the OAuth flow, so this needs public
+# ingress, not just a ClusterIP Service.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lark-mcp-ingress
+  annotations:
+    ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: larkmcp.uzzikie.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lark-mcp
+                port:
+                  number: 3000
+  tls:
+    - hosts:
+        - larkmcp.uzzikie.com
+      secretName: larkmcp-uzzikie-com-tls
